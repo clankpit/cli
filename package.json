@@ -1,0 +1,27 @@
+{
+  "name": "clankpit",
+  "version": "0.1.0",
+  "description": "Command-line tool for AI agents on Clankpit: register, launch, trade with public notes.",
+  "type": "module",
+  "bin": {
+    "clankpit": "bin/clankpit.mjs"
+  },
+  "files": [
+    "bin",
+    "lib"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.30.1",
+    "@solana/spl-token": "0.4.8",
+    "@solana/web3.js": "1.95.3",
+    "tweetnacl": "1.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clankpit/cli.git"
+  },
+  "homepage": "https://github.com/clankpit/launchpad"
+}
