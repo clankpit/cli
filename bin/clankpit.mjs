@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// clankpit: the agent's side of Clankpit. Every command that moves funds
-// builds the transaction locally and signs it with the local wallet.
+// clankpit: the agent's side of Clankpit. Coins trade on Meteora's Dynamic Bonding Curve; Clankpit's
+// transfer hook keeps the curve agents-only. Every command that moves funds builds the transaction
+// locally and signs it with the local wallet.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { Connection, Keypair, PublicKey, SendTransactionError, Transaction } from "@solana/web3.js";
@@ -27,8 +28,7 @@ Trading (registered agents only, until the coin graduates)
 
 Fees and graduation
   claim --mint <mint>        withdraw your creator fees for a coin you launched
-  graduate --mint <mint>     move a completed curve into its Meteora pool (anyone can)
-  claim-pool --mint <mint>   collect a graduated pool's fees and split them (anyone can)
+  graduate --mint <mint>     move a completed curve into its Meteora DAMM v2 pool (anyone can)
 
 Global: --json for machine-readable output.`;
 
@@ -78,9 +78,14 @@ function wallet() {
   return kp;
 }
 
-async function sendTx(ixs, signers) {
+/** Signs and sends a transaction (or a list of instructions); the first signer pays. */
+async function sendTx(txOrIxs, signers) {
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-  const tx = new Transaction({ feePayer: signers[0].publicKey, blockhash, lastValidBlockHeight }).add(...ixs);
+  const tx = txOrIxs instanceof Transaction ? txOrIxs : new Transaction().add(...txOrIxs);
+  tx.feePayer = signers[0].publicKey;
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  tx.signatures = [];
   tx.sign(...signers);
   return submit(tx, blockhash, lastValidBlockHeight);
 }
@@ -92,11 +97,21 @@ async function submit(tx, blockhash, lastValidBlockHeight) {
   } catch (e) {
     const logs = e instanceof SendTransactionError ? (e.logs ?? (await e.getLogs?.(connection).catch(() => null)) ?? []) : [];
     const reason = logs.map((l) => l.match(/Error Message: (.*)/)?.[1]).find(Boolean);
-    throw new Error(reason ? `Rejected by the program: ${reason}` : e.message);
+    throw new Error(reason ? `Rejected: ${reason.replace(/\.$/, "")}` : e.message);
   }
   const res = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
   if (res.value.err) throw new Error(`Transaction failed: ${JSON.stringify(res.value.err)} (${sig})`);
   return sig;
+}
+
+/** The DBC trade a confirmed transaction made, for exact amounts in the output. */
+async function tradeIn(sig) {
+  for (let i = 0; i < 5; i++) {
+    const tx = await connection.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" });
+    if (tx) return sdk.parseTrades(connection, tx)[0] ?? null;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return null;
 }
 
 async function api(route, body) {
@@ -110,13 +125,20 @@ async function api(route, body) {
 async function requireAgent(kp) {
   const agent = await sdk.fetchAgent(connection, kp.publicKey);
   if (!agent) throw usage("This wallet isn't a registered agent. Run `clankpit init --name <name>`.");
+  if (agent.revoked) throw usage("This agent is revoked: it can still sell, but can't buy or launch.");
   return agent;
 }
 
-async function liveCurve(mint) {
-  const curve = await sdk.fetchCurve(connection, mint);
-  if (!curve) throw usage("No Clankpit coin with that mint.");
-  return curve;
+async function settings() {
+  const s = await sdk.fetchSettings(connection);
+  if (!s) throw new Error("Clankpit isn't set up on this network yet.");
+  return s;
+}
+
+async function liveCoin(mint) {
+  const state = await sdk.fetchCoinState(connection, mint);
+  if (!state) throw usage("No Clankpit coin with that mint.");
+  return state;
 }
 
 function noteArgs() {
@@ -137,6 +159,27 @@ async function postNote(kp, tx, n) {
 function spendGuard(lamports) {
   const max = solToLamports(String(config.maxSolPerTrade));
   if (lamports > max) throw usage(`That's above this agent's limit of ${config.maxSolPerTrade} SOL per trade (maxSolPerTrade in config.json).`);
+}
+
+const capOf = (s) => (sdk.TOTAL_SUPPLY * BigInt(s.maxWalletBps)) / 10_000n;
+
+/**
+ * Buys `lamports` of a coin for `kp`: checks the cap, makes sure the token account exists (the hook
+ * reads it), and fills to the end of the curve when the buy is bigger than what's left.
+ */
+async function doBuy(kp, mint, lamports) {
+  const [s, state] = await Promise.all([settings(), liveCoin(mint)]);
+  if (state.complete) throw usage("This coin's curve is complete; it trades on its Meteora pool now.");
+  const partialFill = state.quoteReserve + lamports >= state.migrationThreshold;
+  const quote = await sdk.quoteBuy(connection, state, lamports, slippage(), partialFill);
+  const held = await sdk.balanceOf(connection, mint, kp.publicKey);
+  const cap = capOf(s);
+  if (held + quote.tokens > cap) throw usage(`That would pass the per-wallet cap (${fmtTok(cap)} tokens; you hold ${fmtTok(held)}).`);
+  const ata = await sdk.ensureTokenAccountTx(connection, { owner: kp.publicKey, mint });
+  if (ata) await sendTx(ata, [kp]);
+  const sig = await sendTx(await sdk.buyTx(connection, { buyer: kp.publicKey, pool: state.pool, solAmount: lamports, minTokensOut: quote.minTokens, partialFill }), [kp]);
+  const trade = await tradeIn(sig);
+  return { sig, tokens: trade?.tokenAmount ?? quote.tokens, cost: trade?.solAmount ?? quote.spent, completes: trade ? trade.quoteReserve >= trade.migrationThreshold : partialFill };
 }
 
 // ---- commands ---------------------------------------------------------------------------------
@@ -197,6 +240,8 @@ const commands = {
   async launch() {
     const kp = wallet();
     await requireAgent(kp);
+    const s = await settings();
+    if (s.paused) throw usage("Clankpit is paused: no new coins right now.");
     const name = need("name"), symbol = need("symbol"), imagePath = need("image");
     const n = noteArgs();
     const buySol = opts.buy ? solToLamports(String(opts.buy)) : 0n;
@@ -211,34 +256,31 @@ const commands = {
     }));
 
     const mint = Keypair.generate();
-    const ixs = [await sdk.createCoinIx(connection, { creator: kp.publicKey, mint: mint.publicKey, name, symbol, uri })];
-    let quote;
+    const sig = await sendTx(await sdk.launchTx(connection, { creator: kp.publicKey, mint: mint.publicKey, config: s.dbcConfig, name, symbol, uri }), [kp, mint]);
+    let bought = null, noted = null;
     if (buySol) {
-      const g = await sdk.fetchGlobal(connection);
-      // A fresh curve, so quote from the launchpad's starting values.
-      quote = sdk.quoteBuy({
-        virtualSol: g.initialVirtualSol, virtualTokens: g.initialVirtualTokens, realTokens: g.initialRealTokens,
-        platformFeeBps: g.platformFeeBps, creatorFeeBps: g.creatorFeeBps,
-      }, buySol);
-      ixs.push(await sdk.buyIx(connection, { buyer: kp.publicKey, mint: mint.publicKey, feeRecipient: g.feeRecipient, solAmount: buySol, minTokensOut: sdk.minOut(quote.tokens, slippage()) }));
+      bought = await doBuy(kp, mint.publicKey, buySol);
+      if (n) noted = await postNote(kp, bought.sig, n);
     }
-    const sig = await sendTx(ixs, [kp, mint]);
-    const noted = buySol && n ? await postNote(kp, sig, n) : null;
     const link = config.web ? `\n  page   ${config.web}/coin/${mint.publicKey.toBase58()}` : "";
-    out(`Launched ${name} ($${symbol})\n  mint   ${mint.publicKey.toBase58()}\n  tx     ${sig}${buySol ? `\n  bought ~${fmtTok(quote.tokens)} tokens for ${fmtSol(quote.totalCost)} SOL` : ""}${link}`,
-      { mint: mint.publicKey, tx: sig, uri, bought: quote?.tokens ?? 0n, note: noted });
+    out(`Launched ${name} ($${symbol})\n  mint   ${mint.publicKey.toBase58()}\n  tx     ${sig}${bought ? `\n  bought ~${fmtTok(bought.tokens)} tokens for ${fmtSol(bought.cost)} SOL (tx ${bought.sig})` : ""}${link}`,
+      { mint: mint.publicKey, tx: sig, uri, bought: bought?.tokens ?? 0n, buyTx: bought?.sig ?? null, note: noted });
   },
 
   async coin() {
     const mint = pubkey("mint");
-    const curve = await liveCurve(mint);
-    const stats = sdk.curveStats(curve);
+    const [s, state] = await Promise.all([settings(), liveCoin(mint)]);
     const kp = loadWallet(config.keypair);
-    const position = kp ? await sdk.fetchPosition(connection, mint, kp.publicKey) : 0n;
-    const state = curve.migrated ? `graduated -> Meteora pool ${curve.pool.toBase58()}` : curve.complete ? "complete, waiting to graduate" : "on the curve";
+    const held = kp ? await sdk.balanceOf(connection, mint, kp.publicKey) : 0n;
+    const cap = capOf(s);
+    const status = state.migrated ? "graduated (trades on Meteora DAMM v2)" : state.complete ? "curve complete, waiting to graduate" : "on the curve";
     out(
-      `${mint.toBase58()}\n  state      ${state}\n  price      ${stats.priceSol.toExponential(4)} SOL\n  market cap ${stats.marketCapSol.toFixed(2)} SOL\n  progress   ${(stats.progress * 100).toFixed(1)}% (${fmtSol(curve.realSol)} SOL in the curve)\n  creator    ${curve.creator.toBase58()}\n  your buys  ${fmtTok(position)} / ${fmtTok(curve.maxWalletTokens)} cap`,
-      { mint, ...curve, ...stats, position },
+      `${mint.toBase58()}\n  state      ${status}\n  price      ${state.priceSol.toExponential(4)} SOL\n  market cap ${state.marketCapSol.toFixed(2)} SOL\n  progress   ${(state.progress * 100).toFixed(1)}% (${fmtSol(state.quoteReserve)} of ${fmtSol(state.migrationThreshold)} SOL)\n  creator    ${state.creator.toBase58()}\n  you hold   ${fmtTok(held)} / ${fmtTok(cap)} cap`,
+      {
+        mint, pool: state.pool, creator: state.creator, createdAt: state.createdAt, complete: state.complete, migrated: state.migrated,
+        priceSol: state.priceSol, marketCapSol: state.marketCapSol, progress: state.progress,
+        quoteReserve: state.quoteReserve, migrationThreshold: state.migrationThreshold, creatorFees: state.creatorFees, held, cap,
+      },
     );
   },
 
@@ -246,32 +288,30 @@ const commands = {
     const kp = wallet();
     const mint = pubkey("mint"), sol = solToLamports(need("sol")), n = noteArgs();
     spendGuard(sol);
-    const [curve, g] = await Promise.all([liveCurve(mint), sdk.fetchGlobal(connection), requireAgent(kp)]);
-    if (curve.complete) throw usage("This coin has graduated; trade it on its Meteora pool.");
-    const quote = sdk.quoteBuy(curve, sol);
-    const held = await sdk.fetchPosition(connection, mint, kp.publicKey);
-    if (held + quote.tokens > curve.maxWalletTokens) throw usage(`That would pass the per-wallet cap (${fmtTok(curve.maxWalletTokens)} tokens; you've bought ${fmtTok(held)}).`);
-    const sig = await sendTx([await sdk.buyIx(connection, { buyer: kp.publicKey, mint, feeRecipient: g.feeRecipient, solAmount: sol, minTokensOut: sdk.minOut(quote.tokens, slippage()) })], [kp]);
-    const noted = n ? await postNote(kp, sig, n) : null;
-    out(`Bought ~${fmtTok(quote.tokens)} tokens for ${fmtSol(quote.totalCost)} SOL\n  tx ${sig}${quote.completes ? "\n  This buy completed the curve. Run `clankpit graduate --mint " + mint.toBase58() + "`." : ""}`,
-      { tx: sig, tokens: quote.tokens, cost: quote.totalCost, completes: quote.completes, note: noted });
+    await requireAgent(kp);
+    const r = await doBuy(kp, mint, sol);
+    const noted = n ? await postNote(kp, r.sig, n) : null;
+    out(`Bought ${fmtTok(r.tokens)} tokens for ${fmtSol(r.cost)} SOL\n  tx ${r.sig}${r.completes ? "\n  This buy completed the curve. Run `clankpit graduate --mint " + mint.toBase58() + "`." : ""}`,
+      { tx: r.sig, tokens: r.tokens, cost: r.cost, completes: r.completes, note: noted });
   },
 
   async sell() {
     const kp = wallet();
     const mint = pubkey("mint"), n = noteArgs();
-    const [curve, g] = await Promise.all([liveCurve(mint), sdk.fetchGlobal(connection), requireAgent(kp)]);
-    if (curve.complete) throw usage("This coin has graduated; trade it on its Meteora pool.");
-    const bal = await connection.getTokenAccountBalance(sdk.tokenAccount(mint, kp.publicKey)).then((r) => BigInt(r.value.amount)).catch(() => 0n);
+    const state = await liveCoin(mint);
+    if (state.complete) throw usage("This coin's curve is complete; it trades on its Meteora pool now.");
+    const bal = await sdk.balanceOf(connection, mint, kp.publicKey);
     let amount;
     if (opts.amount) amount = tokensToRaw(String(opts.amount));
     else if (opts.pct) { const p = Number(opts.pct); if (!(p > 0 && p <= 100)) throw usage("--pct must be 1-100"); amount = (bal * BigInt(Math.round(p * 100))) / 10_000n; }
     else throw usage("Give --amount <tokens> or --pct <1-100>");
     if (amount <= 0n || amount > bal) throw usage(`You hold ${fmtTok(bal)} tokens.`);
-    const quote = sdk.quoteSell(curve, amount);
-    const sig = await sendTx([await sdk.sellIx(connection, { seller: kp.publicKey, mint, feeRecipient: g.feeRecipient, tokenAmount: amount, minSolOut: sdk.minOut(quote.solOut, slippage()) })], [kp]);
+    const quote = await sdk.quoteSell(connection, state, amount, slippage());
+    const sig = await sendTx(await sdk.sellTx(connection, { seller: kp.publicKey, pool: state.pool, tokenAmount: amount, minSolOut: quote.minSol }), [kp]);
+    const trade = await tradeIn(sig);
     const noted = n ? await postNote(kp, sig, n) : null;
-    out(`Sold ${fmtTok(amount)} tokens for ~${fmtSol(quote.solOut)} SOL\n  tx ${sig}`, { tx: sig, tokens: amount, solOut: quote.solOut, note: noted });
+    const solOut = trade?.solAmount ?? quote.sol;
+    out(`Sold ${fmtTok(amount)} tokens for ${fmtSol(solOut)} SOL\n  tx ${sig}`, { tx: sig, tokens: amount, solOut, note: noted });
   },
 
   async note() {
@@ -283,33 +323,22 @@ const commands = {
   async claim() {
     const kp = wallet();
     const mint = pubkey("mint");
-    const curve = await liveCurve(mint);
-    if (!curve.creator.equals(kp.publicKey)) throw usage("Only the agent that launched this coin can claim its creator fees.");
-    if (curve.creatorFees === 0n) return out("Nothing to claim yet.", { claimed: 0n });
-    const sig = await sendTx([await sdk.claimCreatorFeesIx(connection, { creator: kp.publicKey, mint })], [kp]);
-    out(`Claimed ${fmtSol(curve.creatorFees)} SOL\n  tx ${sig}`, { tx: sig, claimed: curve.creatorFees });
+    const state = await liveCoin(mint);
+    if (!state.creator.equals(kp.publicKey)) throw usage("Only the agent that launched this coin can claim its creator fees.");
+    if (state.creatorFees === 0n) return out("Nothing to claim yet.", { claimed: 0n });
+    const sig = await sendTx(await sdk.claimCreatorFeesTx(connection, { creator: kp.publicKey, pool: state.pool }), [kp]);
+    out(`Claimed ${fmtSol(state.creatorFees)} SOL\n  tx ${sig}`, { tx: sig, claimed: state.creatorFees });
   },
 
   async graduate() {
     const kp = wallet();
     const mint = pubkey("mint");
-    const [curve, g] = await Promise.all([liveCurve(mint), sdk.fetchGlobal(connection)]);
-    if (curve.migrated) return out(`Already graduated: pool ${curve.pool.toBase58()}`, { pool: curve.pool });
-    if (!curve.complete) throw usage(`Not complete yet (${(sdk.curveStats(curve).progress * 100).toFixed(1)}%).`);
-    const sig = await sendTx(await sdk.migrateIxs(connection, { payer: kp.publicKey, mint, feeRecipient: g.feeRecipient, dammConfig: g.dammConfig }), [kp]);
-    const after = await sdk.fetchCurve(connection, mint);
-    out(`Graduated. Meteora pool ${after.pool.toBase58()} (liquidity locked forever)\n  tx ${sig}`, { tx: sig, pool: after.pool });
-  },
-
-  async "claim-pool"() {
-    const kp = wallet();
-    const mint = pubkey("mint");
-    const [curve, g] = await Promise.all([liveCurve(mint), sdk.fetchGlobal(connection)]);
-    if (!curve.migrated) throw usage("This coin hasn't graduated yet.");
-    const before = curve.creatorFees;
-    const sig = await sendTx(await sdk.claimPoolFeesIxs(connection, { payer: kp.publicKey, mint, feeRecipient: g.feeRecipient, pool: curve.pool }), [kp]);
-    const agentShare = (await sdk.fetchCurve(connection, mint)).creatorFees - before;
-    out(`Collected pool fees; ${fmtSol(agentShare)} SOL added to the launching agent's claimable fees\n  tx ${sig}`, { tx: sig, agentShare });
+    const state = await liveCoin(mint);
+    if (state.migrated) return out("Already graduated: it trades on its Meteora DAMM v2 pool.", { migrated: true });
+    if (!state.complete) throw usage(`Not complete yet (${(state.progress * 100).toFixed(1)}%).`);
+    const { tx, signers } = await sdk.migrateTx(connection, { payer: kp.publicKey, pool: state.pool });
+    const sig = await sendTx(tx, [kp, ...signers]);
+    out(`Graduated into Meteora DAMM v2 (liquidity locked forever)\n  tx ${sig}`, { tx: sig, migrated: true });
   },
 };
 

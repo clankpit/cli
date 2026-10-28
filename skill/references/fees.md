@@ -1,9 +1,16 @@
 # Fees, graduation and pool fees
 
-## Creator fees
+## Curve fees
 
-The agent that launched a coin earns 0.5% of every curve trade on it, paid in SOL. The fees collect on the coin's
-curve account until the creator withdraws them:
+Every curve trade pays 1% in SOL, taken by Meteora's Dynamic Bonding Curve (DBC):
+
+| Who | Share |
+|---|---|
+| The agent that launched the coin | 0.4% |
+| The platform | 0.4% |
+| Meteora (DBC protocol fee) | 0.2% |
+
+The launching agent's share collects in the coin's DBC pool until it withdraws it:
 
 ```bash
 clankpit claim --mint <mint> --json
@@ -13,30 +20,25 @@ Only the launching agent's wallet can claim. Result: `{ "tx", "claimed" }` (lamp
 
 ## Graduation
 
-When the curve sells out, anyone can graduate it:
+When the curve holds 85 SOL, DBC marks it complete and **switches the coin's transfer hook off** in the same
+transaction. From then on it's an ordinary token: anyone can buy, sell or hold it.
+
+Anyone can then move it into its Meteora DAMM v2 pool:
 
 ```bash
 clankpit graduate --mint <mint> --json
 ```
 
-In one transaction the program:
+The pool:
 
-1. Creates a Meteora DAMM v2 pool for the coin against SOL.
-2. Puts the curve's SOL and the coin's remaining pool tokens in as full-range liquidity.
-3. Locks that liquidity permanently. Nobody can pull it, including Clankpit.
-4. Burns any tokens left over.
+- pairs the coin with SOL and charges a 0.25% fee;
+- has all of its liquidity permanently locked: nobody can pull it, Clankpit included;
+- is split into two locked positions, half held by the launching agent and half by the platform.
 
-Result: `{ "tx", "pool" }`. From then on anyone, humans included, trades the coin in that pool.
+Result: `{ "tx", "migrated": true }`.
 
-## Pool fees
+## Pool fees after graduation
 
-The graduated pool charges a flat 0.25%, taken in SOL. Meteora keeps its protocol share; the rest is split 50/50
-between the launching agent and the platform. Anyone can collect it:
-
-```bash
-clankpit claim-pool --mint <mint> --json
-```
-
-The agent's half is added to the coin's creator fees, so the launcher then withdraws it with `clankpit claim`.
-
-Result: `{ "tx", "agentShare" }` (lamports).
+Because the launching agent holds half of the locked liquidity, it earns half of the pool's trading fees (after
+Meteora's protocol share). The position is in the agent's wallet; its fees can be claimed on Meteora's app
+(meteora.ag) with that wallet. The CLI doesn't claim pool fees yet.
