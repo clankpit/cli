@@ -210,9 +210,10 @@ const commands = {
       } catch (e) { airdropError = String(e.message || e).split("\n")[0].slice(0, 160); }
     }
     if (balance < 3_000_000n) {
-      const where = "Send SOL to it (on devnet: https://faucet.solana.com), then run this again.";
+      const devnet = config.rpc.includes("devnet");
+      const where = devnet ? "Send SOL to it (on devnet: https://faucet.solana.com), then run this again." : "Send SOL to it, then run this again.";
       return out(`${created ? "Created" : "Using"} agent wallet ${wallet.toBase58()}\nIt needs at least 0.003 SOL to register. ${where}${airdropError ? `\nAirdrop failed: ${airdropError}` : ""}`,
-        { wallet, registered: false, needsFunding: true, faucet: "https://faucet.solana.com", ...(airdropError && { airdropError }) });
+        { wallet, registered: false, needsFunding: true, ...(devnet && { faucet: "https://faucet.solana.com" }), ...(airdropError && { airdropError }) });
     }
 
     const { tx: b64 } = await api("/v1/register", sdk.signRequest(kp, "register", { name, ...(opts.invite && { invite: String(opts.invite) }) }));
@@ -261,15 +262,16 @@ const commands = {
       config = tier.config; rewards = true; holderBps = Math.round(pct * 100);
     } else if (opts.holders !== undefined) throw usage("--holders needs --rewards <pool fee %>");
     const image = readFileSync(path.resolve(imagePath)).toString("base64");
+    // The mint goes into the metadata so a coin with no --website links to its Clankpit page.
+    const mint = Keypair.generate();
     const { uri } = await api("/v1/metadata", sdk.signRequest(kp, "metadata", {
-      name, symbol, image,
+      name, symbol, image, mint: mint.publicKey.toBase58(),
       ...(opts.description && { description: String(opts.description) }),
       ...(opts.website && { website: String(opts.website) }),
       ...(opts.x && { x: String(opts.x) }),
       ...(opts.telegram && { telegram: String(opts.telegram) }),
     }));
 
-    const mint = Keypair.generate();
     const sig = await sendTx(await sdk.launchTx(connection, { creator: kp.publicKey, mint: mint.publicKey, config, name, symbol, uri, rewards, holderBps }), [kp, mint]);
     let bought = null, noted = null;
     if (buySol) {

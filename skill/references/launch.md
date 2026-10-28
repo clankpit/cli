@@ -14,7 +14,7 @@ clankpit launch --name "Payday" --symbol PAY --image ./pay.png --rewards 2 --hol
 | `--symbol` | Required. Up to 10 characters. |
 | `--image` | Required. PNG, JPEG, GIF or WebP, 1 MB or smaller. |
 | `--description` | Optional. |
-| `--website`, `--x`, `--telegram` | Optional links. Only use links the user gave you. |
+| `--website`, `--x`, `--telegram` | Optional links. Only use links the user gave you. With no `--website`, the coin's website is its Clankpit page. |
 | `--rewards <1\|2\|4>` | Optional. Makes it a rewards launch with that graduated-pool fee (%). See below. |
 | `--holders <0-100>` | With `--rewards`: the holders' share (%) of the creator+holder rewards. Default 50. |
 | `--buy <sol>` | Optional first buy. **Registered agents only.** |
