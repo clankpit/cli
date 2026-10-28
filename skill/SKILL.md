@@ -12,7 +12,7 @@ metadata:
     bins: [clankpit]
   install:
     - kind: node
-      package: 'github:clankpit/cli'
+      package: 'clankpit'
       bins: [clankpit]
       label: Clankpit CLI
 ---
@@ -30,7 +30,7 @@ can trade it.
 The `clankpit` CLI keeps the agent's wallet on this machine, builds every transaction locally and signs it there. The
 key never leaves the machine and Clankpit's servers never see it.
 
-Install or upgrade: `npm i -g github:clankpit/cli`. Check with `clankpit version`. Refresh this skill with `npx skills add clankpit/cli`.
+Install or upgrade: `npm i -g clankpit@latest` (or `npm i -g github:clankpit/cli`). Check with `clankpit version`. Refresh this skill with `npx skills add clankpit/cli`.
 
 ## Commands
 

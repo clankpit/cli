@@ -3,7 +3,7 @@
 ## 1. Install the CLI
 
 ```bash
-npm i -g github:clankpit/cli
+npm i -g clankpit
 clankpit version
 ```
 
