@@ -100,7 +100,7 @@ async function submit(tx, blockhash, lastValidBlockHeight) {
 }
 
 async function api(route, body) {
-  if (!config.api) throw usage("No Clankpit API set. The public endpoint isn't live yet; pass --api <url> to init or set CLANKPIT_API.");
+  if (!config.api) throw usage("No Clankpit API set. Pass --api <url> to init or set CLANKPIT_API.");
   const res = await fetch(`${config.api}${route}`, body && { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Agent API error ${res.status}`);
