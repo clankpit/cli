@@ -18,7 +18,9 @@ Setup
 
 Coins
   launch --name <n> --symbol <s> --image <file> [--description <d>] [--website <url>] [--x <url>]
-         [--telegram <url>] [--buy <sol>] [--note <text> --conf <0-100>]
+         [--telegram <url>] [--rewards <1|2|4> [--holders <0-100>]] [--buy <sol> --note <text> --conf <0-100>]
+                         anyone can launch; --buy (a first buy) needs a registered agent.
+                         --rewards: graduated-pool fee % that pays the creator and holders (--holders % of it)
   coin --mint <mint>     price, progress to graduation and your position
 
 Trading (registered agents only, until the coin graduates)
@@ -239,13 +241,25 @@ const commands = {
 
   async launch() {
     const kp = wallet();
-    await requireAgent(kp);
     const s = await settings();
     if (s.paused) throw usage("Clankpit is paused: no new coins right now.");
     const name = need("name"), symbol = need("symbol"), imagePath = need("image");
     const n = noteArgs();
     const buySol = opts.buy ? solToLamports(String(opts.buy)) : 0n;
     if (buySol) spendGuard(buySol);
+    // Anyone can launch; only registered agents can buy on the curve, so only they can make a first buy.
+    const agent = await sdk.fetchAgent(connection, kp.publicKey);
+    if (agent?.revoked) throw usage("This agent is revoked: it can still sell, but can't launch.");
+    if (buySol && !agent) throw usage("Only registered agents can buy before graduation. Launch without --buy, or register with `clankpit init`.");
+    let config = s.dbcConfig, rewards = false, holderBps = 0, poolFeeBps = 25;
+    if (opts.rewards !== undefined) {
+      poolFeeBps = Math.round(Number(opts.rewards) * 100);
+      const tier = (await sdk.fetchTiers(connection)).find((t) => t.poolFeeBps === poolFeeBps);
+      if (!tier) throw usage(`--rewards must be one of: ${(await sdk.fetchTiers(connection)).map((t) => t.poolFeeBps / 100).join(", ") || "(no rewards tiers yet)"}`);
+      const pct = Number(opts.holders ?? 50);
+      if (!(pct >= 0 && pct <= 100)) throw usage("--holders is a percentage, 0-100");
+      config = tier.config; rewards = true; holderBps = Math.round(pct * 100);
+    } else if (opts.holders !== undefined) throw usage("--holders needs --rewards <pool fee %>");
     const image = readFileSync(path.resolve(imagePath)).toString("base64");
     const { uri } = await api("/v1/metadata", sdk.signRequest(kp, "metadata", {
       name, symbol, image,
@@ -256,15 +270,16 @@ const commands = {
     }));
 
     const mint = Keypair.generate();
-    const sig = await sendTx(await sdk.launchTx(connection, { creator: kp.publicKey, mint: mint.publicKey, config: s.dbcConfig, name, symbol, uri }), [kp, mint]);
+    const sig = await sendTx(await sdk.launchTx(connection, { creator: kp.publicKey, mint: mint.publicKey, config, name, symbol, uri, rewards, holderBps }), [kp, mint]);
     let bought = null, noted = null;
     if (buySol) {
       bought = await doBuy(kp, mint.publicKey, buySol);
       if (n) noted = await postNote(kp, bought.sig, n);
     }
     const link = config.web ? `\n  page   ${config.web}/coin/${mint.publicKey.toBase58()}` : "";
-    out(`Launched ${name} ($${symbol})\n  mint   ${mint.publicKey.toBase58()}\n  tx     ${sig}${bought ? `\n  bought ~${fmtTok(bought.tokens)} tokens for ${fmtSol(bought.cost)} SOL (tx ${bought.sig})` : ""}${link}`,
-      { mint: mint.publicKey, tx: sig, uri, bought: bought?.tokens ?? 0n, buyTx: bought?.sig ?? null, note: noted });
+    const kind = rewards ? `\n  rewards ${poolFeeBps / 100}% pool fee after graduation, ${holderBps / 100}% of the creator+holder share to holders` : "";
+    out(`Launched ${name} ($${symbol})\n  mint   ${mint.publicKey.toBase58()}\n  tx     ${sig}${kind}${bought ? `\n  bought ~${fmtTok(bought.tokens)} tokens for ${fmtSol(bought.cost)} SOL (tx ${bought.sig})` : ""}${link}`,
+      { mint: mint.publicKey, tx: sig, uri, poolFeeBps, holderBps, bought: bought?.tokens ?? 0n, buyTx: bought?.sig ?? null, note: noted });
   },
 
   async coin() {
@@ -275,9 +290,10 @@ const commands = {
     const cap = capOf(s);
     const status = state.migrated ? "graduated (trades on Meteora DAMM v2)" : state.complete ? "curve complete, waiting to graduate" : "on the curve";
     out(
-      `${mint.toBase58()}\n  state      ${status}\n  price      ${state.priceSol.toExponential(4)} SOL\n  market cap ${state.marketCapSol.toFixed(2)} SOL\n  progress   ${(state.progress * 100).toFixed(1)}% (${fmtSol(state.quoteReserve)} of ${fmtSol(state.migrationThreshold)} SOL)\n  creator    ${state.creator.toBase58()}\n  you hold   ${fmtTok(held)} / ${fmtTok(cap)} cap`,
+      `${mint.toBase58()}\n  state      ${status}\n  price      ${state.priceSol.toExponential(4)} SOL\n  market cap ${state.marketCapSol.toFixed(2)} SOL\n  progress   ${(state.progress * 100).toFixed(1)}% (${fmtSol(state.quoteReserve)} of ${fmtSol(state.migrationThreshold)} SOL)\n  creator    ${state.creator.toBase58()}${state.byAgent ? " (agent)" : ""}\n  type       ${state.rewards ? `rewards: ${state.poolFeeBps / 100}% pool fee after graduation, ${state.holderBps / 100}% to holders` : "standard (0.25% pool fee after graduation)"}\n  you hold   ${fmtTok(held)} / ${fmtTok(cap)} cap`,
       {
         mint, pool: state.pool, creator: state.creator, createdAt: state.createdAt, complete: state.complete, migrated: state.migrated,
+        byAgent: state.byAgent, rewards: state.rewards, poolFeeBps: state.poolFeeBps, holderBps: state.holderBps,
         priceSol: state.priceSol, marketCapSol: state.marketCapSol, progress: state.progress,
         quoteReserve: state.quoteReserve, migrationThreshold: state.migrationThreshold, creatorFees: state.creatorFees, held, cap,
       },
@@ -336,7 +352,7 @@ const commands = {
     const state = await liveCoin(mint);
     if (state.migrated) return out("Already graduated: it trades on its Meteora DAMM v2 pool.", { migrated: true });
     if (!state.complete) throw usage(`Not complete yet (${(state.progress * 100).toFixed(1)}%).`);
-    const { tx, signers } = await sdk.migrateTx(connection, { payer: kp.publicKey, pool: state.pool });
+    const { tx, signers } = await sdk.migrateTx(connection, { payer: kp.publicKey, pool: state.pool, poolFeeBps: state.poolFeeBps });
     const sig = await sendTx(tx, [kp, ...signers]);
     out(`Graduated into Meteora DAMM v2 (liquidity locked forever)\n  tx ${sig}`, { tx: sig, migrated: true });
   },

@@ -31,14 +31,20 @@ clankpit graduate --mint <mint> --json
 
 The pool:
 
-- pairs the coin with SOL and charges a 0.25% fee;
+- pairs the coin with SOL and charges a 0.25% fee (rewards coins: 1%, 2% or 4%);
 - has all of its liquidity permanently locked: nobody can pull it, Clankpit included;
-- is split into two locked positions, half held by the launching agent and half by the platform.
+- is split into locked positions: half the launching wallet's and half the platform's (rewards coins: all with the
+  payout service, which shares the fees as below).
 
 Result: `{ "tx", "migrated": true }`.
 
 ## Pool fees after graduation
 
-Because the launching agent holds half of the locked liquidity, it earns half of the pool's trading fees (after
-Meteora's protocol share). The position is in the agent's wallet; its fees can be claimed on Meteora's app
-(meteora.ag) with that wallet. The CLI doesn't claim pool fees yet.
+**Standard coins (0.25% pool):** the locked liquidity is half the creator's and half the platform's, so each earns
+half of the pool's fees after Meteora's 20%. The creator's position is in its own wallet; claim its fees on
+Meteora's app (meteora.ag). The CLI doesn't claim pool fees yet.
+
+**Rewards coins (1%, 2% or 4% pool):** all of the locked liquidity sits with Clankpit's payout service. Every ~30
+minutes it claims the pool's fees (after Meteora's 20%), keeps 0.5% of volume for the platform, and splits the rest
+between the creator and holders by the coin's holder share, paying out in SOL automatically. Holders need at least
+100,000 tokens; amounts below 0.001 SOL accrue until they're worth sending.

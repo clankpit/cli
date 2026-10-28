@@ -8,6 +8,83 @@
   },
   "instructions": [
     {
+      "name": "add_tier",
+      "discriminator": [
+        92,
+        225,
+        133,
+        110,
+        149,
+        39,
+        185,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "settings"
+          ]
+        },
+        {
+          "name": "settings",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  105,
+                  110,
+                  103,
+                  115
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "tier",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  105,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "config"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "pool_fee_bps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
       "name": "initialize",
       "discriminator": [
         175,
@@ -143,7 +220,8 @@
     {
       "name": "register_coin",
       "docs": [
-        "Called by the launching agent right after it creates the coin's DBC pool, in the same transaction."
+        "Called by the launcher (anyone) right after it creates the coin's DBC pool, in the same transaction.",
+        "`holder_bps` is the holders' share of a rewards coin's creator+holder pool fees (0 for standard launches)."
       ],
       "discriminator": [
         79,
@@ -202,6 +280,13 @@
               }
             ]
           }
+        },
+        {
+          "name": "tier",
+          "docs": [
+            "The rewards tier of the pool's config; omitted for a standard launch."
+          ],
+          "optional": true
         },
         {
           "name": "mint"
@@ -273,6 +358,77 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "holder_bps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "remove_tier",
+      "discriminator": [
+        121,
+        178,
+        31,
+        94,
+        107,
+        193,
+        142,
+        235
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "settings"
+          ]
+        },
+        {
+          "name": "settings",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  116,
+                  116,
+                  105,
+                  110,
+                  103,
+                  115
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "tier",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  105,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "tier.config",
+                "account": "Tier"
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -585,6 +741,19 @@
         67,
         173
       ]
+    },
+    {
+      "name": "Tier",
+      "discriminator": [
+        18,
+        149,
+        18,
+        34,
+        50,
+        201,
+        207,
+        55
+      ]
     }
   ],
   "types": [
@@ -670,13 +839,34 @@
           {
             "name": "creator",
             "docs": [
-              "The launching agent."
+              "The launching wallet (an agent or not)."
             ],
             "type": "pubkey"
           },
           {
             "name": "created_at",
             "type": "i64"
+          },
+          {
+            "name": "pool_fee_bps",
+            "docs": [
+              "The graduated pool's fee, in bps: 25 for a standard launch, the tier's rate for a rewards launch."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "holder_bps",
+            "docs": [
+              "Share of a rewards coin's creator+holder pool fees that goes to holders, in bps. 0 for standard launches."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "by_agent",
+            "docs": [
+              "Whether the creator was a registered agent at launch."
+            ],
+            "type": "bool"
           },
           {
             "name": "bump",
@@ -700,6 +890,18 @@
           {
             "name": "creator",
             "type": "pubkey"
+          },
+          {
+            "name": "pool_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "holder_bps",
+            "type": "u16"
+          },
+          {
+            "name": "by_agent",
+            "type": "bool"
           },
           {
             "name": "timestamp",
@@ -772,6 +974,46 @@
           }
         ]
       }
+    },
+    {
+      "name": "Tier",
+      "docs": [
+        "A rewards-launch DBC config: same curve as the standard one, but it graduates into a pool with a higher",
+        "fee and all of the locked liquidity in the platform's position, whose fees are split by the payout service."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TierAdded",
+      "type": {
+        "fields": [
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool_fee_bps",
+            "type": "u16"
+          }
+        ],
+        "kind": "struct"
+      }
     }
   ],
   "events": [
@@ -813,6 +1055,19 @@
         170
       ],
       "name": "CoinRegistered"
+    },
+    {
+      "discriminator": [
+        230,
+        175,
+        124,
+        76,
+        202,
+        89,
+        91,
+        117
+      ],
+      "name": "TierAdded"
     }
   ],
   "errors": [
