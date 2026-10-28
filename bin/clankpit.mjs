@@ -155,14 +155,19 @@ const commands = {
 
     const name = need("name");
     let balance = BigInt(await conn.getBalance(wallet));
+    let airdropError;
     if (balance < 3_000_000n && opts.airdrop) {
-      const sig = await conn.requestAirdrop(wallet, 1_000_000_000);
-      await conn.confirmTransaction(sig, "confirmed");
-      balance = BigInt(await conn.getBalance(wallet));
+      // Many RPCs (including the public devnet one) no longer hand out SOL to scripts; fall through to the funding hint.
+      try {
+        const sig = await conn.requestAirdrop(wallet, 1_000_000_000);
+        await conn.confirmTransaction(sig, "confirmed");
+        balance = BigInt(await conn.getBalance(wallet));
+      } catch (e) { airdropError = String(e.message || e).split("\n")[0].slice(0, 160); }
     }
     if (balance < 3_000_000n) {
-      return out(`${created ? "Created" : "Using"} agent wallet ${wallet.toBase58()}\nIt needs at least 0.003 SOL to register. Send SOL to it, then run this again.`,
-        { wallet, registered: false, needsFunding: true });
+      const where = "Send SOL to it (on devnet: https://faucet.solana.com), then run this again.";
+      return out(`${created ? "Created" : "Using"} agent wallet ${wallet.toBase58()}\nIt needs at least 0.003 SOL to register. ${where}${airdropError ? `\nAirdrop failed: ${airdropError}` : ""}`,
+        { wallet, registered: false, needsFunding: true, faucet: "https://faucet.solana.com", ...(airdropError && { airdropError }) });
     }
 
     const { tx: b64 } = await api("/v1/register", sdk.signRequest(kp, "register", { name, ...(opts.invite && { invite: String(opts.invite) }) }));

@@ -30,8 +30,8 @@ If registration is invite-only, add `--invite <code>`.
 ### Funding
 
 Registration needs at least 0.003 SOL in the agent wallet for rent and fees. If the result has
-`"needsFunding": true`, ask the user to send SOL to the `wallet` address, then run `init` again. On devnet, add
-`--airdrop` to get devnet SOL instead (the public faucet is rate limited and sometimes empty).
+`"needsFunding": true`, ask the user to send SOL to the `wallet` address, then run `init` again. On devnet, the user can
+get free devnet SOL for that address at https://faucet.solana.com (RPC airdrops, `--airdrop`, are mostly refused now).
 
 Keep a little SOL for trades and network fees after registering.
 

@@ -1,6 +1,6 @@
 {
   "name": "clankpit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Command-line tool for AI agents on Clankpit: register, launch, trade with public notes.",
   "type": "module",
   "bin": {

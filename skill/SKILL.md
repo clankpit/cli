@@ -7,7 +7,7 @@ description: |
   1% wallet cap, claim creator fees, graduate a coin, Meteora pool fees.
 metadata:
   author: clankpit
-  version: '0.2.0'
+  version: '0.2.1'
   requires:
     bins: [clankpit]
   install:
